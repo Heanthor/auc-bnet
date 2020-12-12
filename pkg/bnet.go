@@ -20,20 +20,6 @@ type HTTP interface {
 	refreshOAuth()
 }
 
-// Client handles OAuth and rate limiting for the BNet API
-type Client struct {
-	httpClient HTTP
-
-	// the game data queries realms by using their "connected realm ID"
-	// this is a prepopulated map of realm slug and the connected realm ID, if available
-	// top level map is by region
-	// read-only, so threads can go crazy
-	connectedRealms map[string]map[string]int
-	// connectedRealms will only include "main" realms and not those that fall into a pool of connected realms
-	// this map contains all region -> realm slug -> realmID
-	allRealmSlugs map[string]map[string]int
-}
-
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
 type AllRealmCollection map[string]map[string]int
 
