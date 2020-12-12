@@ -1,246 +1,213 @@
-package pkg
+package bnet
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
-	"io/ioutil"
-	"net/http"
-	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/transform"
+
+	"golang.org/x/text/unicode/norm"
 )
 
-// OAuthResponse is the response struct for a client_credentials request
-type oAuthResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+// HTTP contains mockable bnet http calls
+type HTTP interface {
+	Get(region, endpoint string) ([]byte, error)
+	GetIfNotModified(region, endpoint, since string) (string, []byte, error)
+	refreshOAuth()
 }
 
-type BNet struct {
-	httpClient *http.Client
+// Client handles OAuth and rate limiting for the BNet API
+type Client struct {
+	httpClient HTTP
 
-	oAuthUrl string
-	apiUrl   string
-
-	currentToken oAuthResponse
-
-	clientID     string
-	clientSecret string
-
-	log *zerolog.Logger
+	// the game data queries realms by using their "connected realm ID"
+	// this is a prepopulated map of realm slug and the connected realm ID, if available
+	// top level map is by region
+	// read-only, so threads can go crazy
+	connectedRealms map[string]map[string]int
+	// connectedRealms will only include "main" realms and not those that fall into a pool of connected realms
+	// this map contains all region -> realm slug -> realmID
+	allRealmSlugs map[string]map[string]int
 }
 
-type BNetOptions struct {
-	// Default: on
-	EnableLogging     bool
-	ProductionLogging bool
-	LogLevel          string
+// AllRealmCollection maps a region string to a map of realm slug to connected realm id info
+type AllRealmCollection map[string]map[string]int
+
+// AllRealmCollection maps a region string to a map of realm slug to connected realm id info
+type ConnectedRealmCollection map[string]map[string]int
+
+// IsValidRealm tests the given realmSlug and returns if it is valid
+func (rc AllRealmCollection) IsValidRealm(realmSlug, region string) bool {
+	_, ok := rc[region][realmSlug]
+
+	return ok
 }
 
-const regionPlaceholder = "{region}"
+type Realms struct {
+	ConnectedRealms ConnectedRealmCollection
+	AllRealms       AllRealmCollection
+}
 
-var ErrNoAccessToken = errors.New("could not retrieve access token")
-
-func New(clientID, clientSecret, oAuthUrl, apiUrl string, options *BNetOptions) (*BNet, error) {
-	if err := validateBaseUrl(oAuthUrl); err != nil {
-		return nil, fmt.Errorf("validate oauthUrl: %+v", err)
-	}
-
-	if err := validateBaseUrl(apiUrl); err != nil {
-		return nil, fmt.Errorf("validate apiUrl: %+v", err)
-	}
-
-	var logger zerolog.Logger
-	if !options.EnableLogging {
-		logger = zerolog.Nop()
-	} else if !options.ProductionLogging {
-		logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	} else {
-		logger = zerolog.Logger{}
-	}
-
-	logger = logger.With().Str("in", "auc-bnet").Logger()
-
-	b := BNet{
-		httpClient:   &http.Client{},
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		oAuthUrl:     oAuthUrl,
-		apiUrl:       apiUrl,
-		log:          &logger,
-	}
-
-	if err := b.refreshOAuth(); err != nil {
+// GetRealmList calculates valid realm ids for a given region
+func GetRealmList(h HTTP, region string) (*Realms, error) {
+	// get all realms
+	resp, err := h.Get(region, fmt.Sprintf("data/wow/realm/index?locale=en_US&namespace=dynamic-%s",
+		region))
+	if err != nil {
 		return nil, err
 	}
 
-	return &b, nil
-}
-
-// validateBaseUrl checks if a baseUrl has the expected region placeholder.
-// This is need because battle.net urls expect a region, usually as the subdomain, but
-// for local testing, it might not be possible to place it in the same place
-func validateBaseUrl(baseUrl string) error {
-	if strings.Contains(baseUrl, regionPlaceholder) {
-		return nil
-	} else {
-		return fmt.Errorf("%s does not contain region placeholder \"%s\"", baseUrl, regionPlaceholder)
-	}
-}
-
-func subRegion(base, path, region string) string {
-	// in case an endpoint is not prefixed with '/'
-	endpoint := strings.Trim(path, " ")
-	sep := ""
-	if endpoint[0] != '/' {
-		sep = "/"
-	}
-
-	return strings.Replace(fmt.Sprintf("%s%s%s", base, sep, endpoint), regionPlaceholder, region, -1)
-}
-
-func (b *BNet) refreshOAuth() error {
-	req, err := http.NewRequest("GET",
-		subRegion(b.oAuthUrl, "/oauth/token?grant_type=client_credentials", "us"),
-		nil)
-	if err != nil {
-		b.log.Err(err).Msg("Error creating bnet Request")
-
-		return err
-	}
-
-	req.SetBasicAuth(b.clientID, b.clientSecret)
-
-	// begin error hell
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
-		b.log.Err(err).Msg("Error creating bnet Request")
-
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		b.log.Err(err).Msg("Error reading response body")
-
-		return err
-	}
-
-	var respStruct oAuthResponse
-
-	if err = json.Unmarshal(body, &respStruct); err != nil {
-		b.log.Err(err).Str("body", string(body)).Msg("Error unmarshalling response")
-
-		return err
-	}
-
-	if len(respStruct.AccessToken) == 0 {
-		b.log.Error().Msg("Could not retrieve access token")
-
-		return ErrNoAccessToken
-	}
-
-	b.log.Info().Msg("Authenticated with Battle.net API")
-
-	b.currentToken = respStruct
-
-	return nil
-}
-
-// Get wraps http.Get, monitoring rate limits. If limit is exceeded, will block until more requests can be sent.
-// Get also handles OAuth credentials and retries
-func (b *BNet) Get(region, endpoint string) ([]byte, error) {
-	url := subRegion(b.apiUrl, endpoint, region)
-	status, _, body, err := b.get(url)
-
-	// retry once if a random 500 happens, sometimes it will resolve itself
-	if status == http.StatusInternalServerError {
-		status, _, body, err = b.get(url)
-	}
-
-	if status > 0 && status != 200 {
-		b.log.Error().
-			Str("url", url).
-			Int("statusCode", status).
-			Str("body", string(body)).
-			Msg("BNet.Get failed")
-
-		return nil, fmt.Errorf("response code %d", status)
-	}
-
-	return body, err
-}
-
-func (b *BNet) get(url string, headers ...[]string) (int, http.Header, []byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		b.log.Error().Msg("Could not retrieve access token")
-
-		return -1, nil, nil, err
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", b.currentToken.AccessToken))
-
-	for _, h := range headers {
-		if h != nil {
-			req.Header.Add(h[0], h[1])
+	type realmListResp struct {
+		Realms []struct {
+			ID   int
+			Slug string
 		}
 	}
 
-	response, err := b.httpClient.Do(req)
-	if err != nil {
-		b.log.Err(err).Msg("Error in http Do GET")
-		return -1, nil, nil, err
+	var rlr realmListResp
+	if err := json.Unmarshal(resp, &rlr); err != nil {
+		return nil, err
 	}
 
-	defer response.Body.Close()
+	// get all connected realms
+	resp, err = h.Get(region, fmt.Sprintf("data/wow/connected-realm/index?locale=en_US&namespace=dynamic-%s",
+		region))
+	if err != nil {
+		return nil, err
+	}
 
-	b.log.Debug().
-		Str("url", url).
-		Int("status", response.StatusCode).
-		Msg("Bnet API Request")
+	type connectedRealmsResponse struct {
+		ConnectedRealms []struct {
+			Href string
+		} `json:"connected_realms"`
+	}
 
-	if response.StatusCode == 401 {
-		// OAuth is invalid, refresh
-		log.Info().Msg("Token expired, refreshing")
-		if err := b.refreshOAuth(); err != nil {
-			return -1, nil, nil, err
+	var crr connectedRealmsResponse
+	if err := json.Unmarshal(resp, &crr); err != nil {
+		return nil, err
+	}
+
+	// connected realms are returned as urls, extract out the id
+	regex := regexp.MustCompile(`connected-realm/([0-9]+)\?`)
+
+	crLookup := make(map[int]struct{})
+	for _, cr := range crr.ConnectedRealms {
+		// extract id from url...
+		if matches := regex.FindStringSubmatch(cr.Href); matches != nil && len(matches) > 0 {
+			id, err := strconv.Atoi(matches[1])
+			if err != nil {
+				return nil, err
+			}
+
+			// and assign it to the map
+			crLookup[id] = struct{}{}
 		}
-
-		return b.get(url)
 	}
 
-	rawContents, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		b.log.Err(err).Msg("Error in http reading response body")
-		return -1, nil, nil, err
+	count := 0
+	m := make(map[string]int)
+	ar := make(map[string]int)
+	for _, r := range rlr.Realms {
+		ar[r.Slug] = r.ID
+		// filter any realm that is not part of the connected realms list, these will be lazy loaded later
+		if _, ok := crLookup[r.ID]; ok {
+			m[r.Slug] = r.ID
+			count++
+		}
 	}
 
-	return response.StatusCode, response.Header, rawContents, nil
+	r := &Realms{
+		ConnectedRealms: make(map[string]map[string]int),
+		AllRealms:       make(map[string]map[string]int),
+	}
+
+	r.AllRealms[region] = ar
+	r.ConnectedRealms[region] = m
+
+	return r, nil
 }
 
-// GetIfNotModified sets the If-Modified-Since header and returns true if a response was received, false otherwise
-// If a response is returned, return the value of the Last-Modified header
-func (b *BNet) GetIfNotModified(region, endpoint string, since string) (string, []byte, error) {
-	var h []string
-	if since != "" {
-		h = []string{"If-Modified-Since", since}
+// ConnectedRealmID retrieves a connected realm given the region and realm slug.
+func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region string) (int, error) {
+	if !IsValidRegion(region) {
+		return -1, fmt.Errorf("invalid region")
 	}
 
-	url := subRegion(b.apiUrl, endpoint, region)
+	r := strings.ToLower(strings.TrimSpace(realmSlug))
 
-	status, headers, body, err := b.get(url, h)
-	if err != nil || status == http.StatusNotModified {
-		return "", nil, err
+	if id, ok := c[region][r]; ok {
+		return id, nil
 	}
 
-	if status != http.StatusOK {
-		return "", body, fmt.Errorf("GetIfNotModified returned %d: %s", status, string(body))
+	// if the realm is not a top-level connected realm, it is part of a realm pool
+	// we need to search for the pool it is in and save the connectedRealmID
+	resp, err := h.Get(region, fmt.Sprintf("data/wow/search/connected-realm?namespace=dynamic-%s&locale=en_US&realms.slug=%s",
+		region, r))
+	if err != nil {
+		return -1, err
 	}
 
-	return headers.Get("Last-Modified"), body, err
+	type realmSearchResp struct {
+		PageSize int // sanity check
+		Results  []struct {
+			Data struct {
+				ID   int
+				Slug string
+			}
+		}
+	}
+
+	var sr realmSearchResp
+	if err := json.Unmarshal(resp, &sr); err != nil {
+		return -1, err
+	}
+
+	i := 0
+	if sr.PageSize > 1 {
+		// this seems to be very uncommon
+		// but, if a search result returns more than one result, it can still be valid
+		// example: twisting nether US
+		for j, r := range sr.Results {
+			if r.Data.Slug == realmSlug {
+				i = j
+				break
+			}
+		}
+	} else if sr.PageSize == 0 {
+		return -1, fmt.Errorf("invalid realm slug")
+	}
+
+	id := sr.Results[i].Data.ID
+	// cache the result
+	c[region][realmSlug] = id
+
+	return id, nil
+}
+
+// remove diacritics
+func isMn(r rune) bool {
+	return unicode.Is(unicode.Mn, r) // Mn: nonspacing marks
+}
+
+// RealmSlug returns the normalized realm slug representation of a realm string
+func RealmSlug(realm string) string {
+	rs := strings.ToLower(realm)
+	rs = strings.Replace(rs, "-", "", -1)
+	rs = strings.Replace(rs, "'", "", -1)
+	rs = strings.Replace(rs, " ", "-", -1)
+
+	t := transform.Chain(norm.NFD, transform.RemoveFunc(isMn), norm.NFC)
+	result, _, _ := transform.String(t, rs)
+	return result
+}
+
+// IsValidRegion accepts region strings "us" or "eu"
+func IsValidRegion(region string) bool {
+	i := strings.Index("useu", region)
+
+	return i == 0 || i == 2
 }
