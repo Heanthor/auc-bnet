@@ -17,7 +17,7 @@ import (
 type HTTP interface {
 	Get(region, endpoint string) ([]byte, error)
 	GetIfNotModified(region, endpoint, since string) (string, []byte, error)
-	refreshOAuth()
+	refreshOAuth() error
 }
 
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
