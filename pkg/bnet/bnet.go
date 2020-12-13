@@ -21,19 +21,20 @@ type HTTP interface {
 }
 
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
-type AllRealmCollection map[string]map[string]int
+type AllRealmCollection map[string]int
 
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
-type ConnectedRealmCollection map[string]map[string]int
+type ConnectedRealmCollection map[string]int
 
 // IsValidRealm tests the given realmSlug and returns if it is valid
-func (rc AllRealmCollection) IsValidRealm(realmSlug, region string) bool {
-	_, ok := rc[region][realmSlug]
+func (rc AllRealmCollection) IsValidRealm(realmSlug string) bool {
+	_, ok := rc[realmSlug]
 
 	return ok
 }
 
 type Realms struct {
+	Region          string
 	ConnectedRealms ConnectedRealmCollection
 	AllRealms       AllRealmCollection
 }
@@ -107,12 +108,12 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 	}
 
 	r := &Realms{
-		ConnectedRealms: make(map[string]map[string]int),
-		AllRealms:       make(map[string]map[string]int),
+		ConnectedRealms: make(map[string]int),
+		AllRealms:       make(map[string]int),
 	}
 
-	r.AllRealms[region] = ar
-	r.ConnectedRealms[region] = m
+	r.AllRealms = ar
+	r.ConnectedRealms = m
 
 	return r, nil
 }
@@ -125,7 +126,7 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 
 	r := strings.ToLower(strings.TrimSpace(realmSlug))
 
-	if id, ok := c[region][r]; ok {
+	if id, ok := c[r]; ok {
 		return id, nil
 	}
 
@@ -169,7 +170,7 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 
 	id := sr.Results[i].Data.ID
 	// cache the result
-	c[region][realmSlug] = id
+	c[realmSlug] = id
 
 	return id, nil
 }
