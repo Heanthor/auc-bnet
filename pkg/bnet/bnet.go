@@ -3,6 +3,7 @@ package bnet
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 // HTTP contains mockable bnet http calls
 type HTTP interface {
-	Get(region, endpoint string) ([]byte, error)
+	Get(region, endpoint string) ([]byte, http.Header, error)
 	GetIfNotModified(region, endpoint, since string) (string, []byte, error)
 	refreshOAuth() error
 }
@@ -42,7 +43,7 @@ type Realms struct {
 // GetRealmList calculates valid realm ids for a given region
 func GetRealmList(h HTTP, region string) (*Realms, error) {
 	// get all realms
-	resp, err := h.Get(region, fmt.Sprintf("data/wow/realm/index?locale=en_US&namespace=dynamic-%s",
+	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/realm/index?locale=en_US&namespace=dynamic-%s",
 		region))
 	if err != nil {
 		return nil, err
@@ -61,7 +62,7 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 	}
 
 	// get all connected realms
-	resp, err = h.Get(region, fmt.Sprintf("data/wow/connected-realm/index?locale=en_US&namespace=dynamic-%s",
+	resp, _, err = h.Get(region, fmt.Sprintf("data/wow/connected-realm/index?locale=en_US&namespace=dynamic-%s",
 		region))
 	if err != nil {
 		return nil, err
@@ -132,7 +133,7 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 
 	// if the realm is not a top-level connected realm, it is part of a realm pool
 	// we need to search for the pool it is in and save the connectedRealmID
-	resp, err := h.Get(region, fmt.Sprintf("data/wow/search/connected-realm?namespace=dynamic-%s&locale=en_US&realms.slug=%s",
+	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/search/connected-realm?namespace=dynamic-%s&locale=en_US&realms.slug=%s",
 		region, r))
 	if err != nil {
 		return -1, err
