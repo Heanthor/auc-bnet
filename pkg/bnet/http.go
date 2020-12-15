@@ -151,11 +151,11 @@ func (b *BNet) refreshOAuth() error {
 	return nil
 }
 
-// Get wraps http.Get, monitoring rate limits. If limit is exceeded, will block until more requests can be sent.
-// Get also handles OAuth credentials and retries
-func (b *BNet) Get(region, endpoint string) ([]byte, error) {
+// Get wraps http.Get.
+// Get also handles OAuth credentials and retries.
+func (b *BNet) Get(region, endpoint string) ([]byte, http.Header, error) {
 	url := subRegion(b.apiUrl, endpoint, region)
-	status, _, body, err := b.get(url)
+	status, headers, body, err := b.get(url)
 
 	// retry once if a random 500 happens, sometimes it will resolve itself
 	if status == http.StatusInternalServerError {
@@ -169,10 +169,10 @@ func (b *BNet) Get(region, endpoint string) ([]byte, error) {
 			Str("body", string(body)).
 			Msg("BNet.Get failed")
 
-		return nil, fmt.Errorf("response code %d", status)
+		return nil, nil, fmt.Errorf("response code %d", status)
 	}
 
-	return body, err
+	return body, headers, err
 }
 
 func (b *BNet) get(url string, headers ...[]string) (int, http.Header, []byte, error) {
