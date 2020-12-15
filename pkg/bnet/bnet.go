@@ -111,6 +111,7 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 	r := &Realms{
 		ConnectedRealms: make(map[string]int),
 		AllRealms:       make(map[string]int),
+		Region:          region,
 	}
 
 	r.AllRealms = ar
