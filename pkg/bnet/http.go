@@ -59,7 +59,7 @@ func New(clientID, clientSecret, oAuthUrl, apiUrl string, options *Options) (*BN
 	} else if !options.ProductionLogging {
 		logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 	} else {
-		logger = zerolog.Logger{}
+		logger = zerolog.New(os.Stderr)
 	}
 
 	logger = logger.With().Str("in", "auc-bnet").Logger()
