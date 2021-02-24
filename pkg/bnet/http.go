@@ -103,7 +103,7 @@ func subRegion(base, path, region string) string {
 }
 
 func (b *BNet) refreshOAuth() error {
-	req, err := http.NewRequest("GET",
+	req, err := http.NewRequest(http.MethodPost,
 		subRegion(b.oAuthUrl, "/oauth/token?grant_type=client_credentials", "us"),
 		nil)
 	if err != nil {
