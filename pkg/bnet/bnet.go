@@ -2,6 +2,7 @@ package bnet
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -41,6 +42,7 @@ type Realms struct {
 }
 
 // GetRealmList calculates valid realm ids for a given region
+// This methods makes many API calls to populate the full list of connected realms
 func GetRealmList(h HTTP, region string) (*Realms, error) {
 	// get all realms
 	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/realm/index?locale=en_US&namespace=dynamic-%s",
@@ -96,31 +98,33 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 		}
 	}
 
-	count := 0
-	m := make(map[string]int)
-	ar := make(map[string]int)
+	m := ConnectedRealmCollection(make(map[string]int))
+	ar := AllRealmCollection(make(map[string]int))
 	for _, r := range rlr.Realms {
 		ar[r.Slug] = r.ID
-		// filter any realm that is not part of the connected realms list, these will be lazy loaded later
 		if _, ok := crLookup[r.ID]; ok {
 			m[r.Slug] = r.ID
-			count++
+		} else {
+			// this realm is non-root, do a secondary query to find its connRealmID
+			// ConnectedRealmID has a side effect of updating m
+			_, err := m.ConnectedRealmID(h, r.Slug, region)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	r := &Realms{
-		ConnectedRealms: make(map[string]int),
-		AllRealms:       make(map[string]int),
+		ConnectedRealms: m,
+		AllRealms:       ar,
 		Region:          region,
 	}
-
-	r.AllRealms = ar
-	r.ConnectedRealms = m
 
 	return r, nil
 }
 
 // ConnectedRealmID retrieves a connected realm given the region and realm slug.
+// Note maps are always passed by reference, so a pointer receiver here doesn't matter!
 func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region string) (int, error) {
 	if !IsValidRegion(region) {
 		return -1, fmt.Errorf("invalid region")
@@ -132,49 +136,40 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 		return id, nil
 	}
 
+	// connected realms are returned as urls, extract out the id
+	regex := regexp.MustCompile(`connected-realm/([0-9]+)\?`)
+
 	// if the realm is not a top-level connected realm, it is part of a realm pool
 	// we need to search for the pool it is in and save the connectedRealmID
-	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/search/connected-realm?namespace=dynamic-%s&locale=en_US&realms.slug=%s",
-		region, r))
+	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/realm/%s?namespace=dynamic-%s&locale=en_US",
+		r, region))
 	if err != nil {
 		return -1, err
 	}
 
-	type realmSearchResp struct {
-		PageSize int // sanity check
-		Results  []struct {
-			Data struct {
-				ID   int
-				Slug string
-			}
-		}
+	type realmResp struct {
+		ConnectedRealm struct {
+			Href string
+		} `json:"connected_realm"`
 	}
 
-	var sr realmSearchResp
-	if err := json.Unmarshal(resp, &sr); err != nil {
+	var rr realmResp
+	if err := json.Unmarshal(resp, &rr); err != nil {
 		return -1, err
 	}
 
-	i := 0
-	if sr.PageSize > 1 {
-		// this seems to be very uncommon
-		// but, if a search result returns more than one result, it can still be valid
-		// example: twisting nether US
-		for j, r := range sr.Results {
-			if r.Data.Slug == realmSlug {
-				i = j
-				break
-			}
+	if matches := regex.FindStringSubmatch(rr.ConnectedRealm.Href); matches != nil && len(matches) > 0 {
+		id, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return -1, err
 		}
-	} else if sr.PageSize == 0 {
-		return -1, fmt.Errorf("invalid realm slug")
+		// cache the result
+		c[realmSlug] = id
+
+		return id, nil
 	}
 
-	id := sr.Results[i].Data.ID
-	// cache the result
-	c[realmSlug] = id
-
-	return id, nil
+	return -1, errors.New("could not find connected realm in href for realm")
 }
 
 // remove diacritics
