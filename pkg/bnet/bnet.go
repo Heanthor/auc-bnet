@@ -1,13 +1,16 @@
 package bnet
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"golang.org/x/text/transform"
@@ -100,18 +103,37 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 
 	m := ConnectedRealmCollection(make(map[string]int))
 	ar := AllRealmCollection(make(map[string]int))
+	rs := &realmScanner{}
+
+	ctx := context.Background()
+	eg, ctx := errgroup.WithContext(ctx)
+	ch := make(chan string, len(rlr.Realms))
 	for _, r := range rlr.Realms {
 		ar[r.Slug] = r.ID
 		if _, ok := crLookup[r.ID]; ok {
 			m[r.Slug] = r.ID
 		} else {
-			// this realm is non-root, do a secondary query to find its connRealmID
-			// ConnectedRealmID has a side effect of updating m
-			_, err := m.ConnectedRealmID(h, r.Slug, region)
-			if err != nil {
-				return nil, err
-			}
+			// retrieve these realms in parallel later
+			ch <- r.Slug
 		}
+	}
+
+	for slug := range ch {
+		eg.Go(func() error {
+			// this realm is non-root, do a secondary query to find its connRealmID
+			// connRealmID has a side effect of updating m
+			// and is thread safe thanks to the lock in rs
+			_, err := rs.connRealmID(h, slug, region, m)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
 
 	r := &Realms{
@@ -123,18 +145,31 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 	return r, nil
 }
 
+// realmScanner contains a lock which allows connRealmID to be called in parallel
+type realmScanner struct {
+	lock *sync.RWMutex
+}
+
+var r *realmScanner
+
 // ConnectedRealmID retrieves a connected realm given the region and realm slug.
 // Note maps are always passed by reference, so a pointer receiver here doesn't matter!
 func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region string) (int, error) {
+	return r.connRealmID(h, realmSlug, region, c)
+}
+
+func (r *realmScanner) connRealmID(h HTTP, realmSlug, region string, c ConnectedRealmCollection) (int, error) {
 	if !IsValidRegion(region) {
 		return -1, fmt.Errorf("invalid region")
 	}
 
-	r := strings.ToLower(strings.TrimSpace(realmSlug))
+	sanitized := strings.ToLower(strings.TrimSpace(realmSlug))
 
-	if id, ok := c[r]; ok {
+	r.lock.RLock()
+	if id, ok := c[sanitized]; ok {
 		return id, nil
 	}
+	r.lock.RUnlock()
 
 	// connected realms are returned as urls, extract out the id
 	regex := regexp.MustCompile(`connected-realm/([0-9]+)\?`)
@@ -142,7 +177,7 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 	// if the realm is not a top-level connected realm, it is part of a realm pool
 	// we need to search for the pool it is in and save the connectedRealmID
 	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/realm/%s?namespace=dynamic-%s&locale=en_US",
-		r, region))
+		sanitized, region))
 	if err != nil {
 		return -1, err
 	}
@@ -163,8 +198,11 @@ func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region str
 		if err != nil {
 			return -1, err
 		}
+
+		r.lock.Lock()
 		// cache the result
 		c[realmSlug] = id
+		r.lock.Unlock()
 
 		return id, nil
 	}
