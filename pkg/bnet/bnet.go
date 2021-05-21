@@ -21,8 +21,6 @@ import (
 // HTTP contains mockable bnet http calls
 type HTTP interface {
 	Get(region, endpoint string) ([]byte, http.Header, error)
-	GetIfNotModified(region, endpoint, since string) (string, []byte, error)
-	refreshOAuth() error
 }
 
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
@@ -103,7 +101,9 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 
 	m := ConnectedRealmCollection(make(map[string]int))
 	ar := AllRealmCollection(make(map[string]int))
-	rs := &realmScanner{}
+	rs := realmScanner{
+		lock: &sync.RWMutex{},
+	}
 
 	ctx := context.Background()
 	eg, ctx := errgroup.WithContext(ctx)
@@ -117,13 +117,15 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 			ch <- r.Slug
 		}
 	}
+	close(ch)
 
 	for slug := range ch {
+		s := slug
 		eg.Go(func() error {
 			// this realm is non-root, do a secondary query to find its connRealmID
 			// connRealmID has a side effect of updating m
 			// and is thread safe thanks to the lock in rs
-			_, err := rs.connRealmID(h, slug, region, m)
+			_, err := rs.connRealmID(h, s, region, m)
 			if err != nil {
 				return err
 			}
@@ -150,7 +152,13 @@ type realmScanner struct {
 	lock *sync.RWMutex
 }
 
-var r *realmScanner
+var r realmScanner
+
+func init() {
+	r = realmScanner{
+		lock: &sync.RWMutex{},
+	}
+}
 
 // ConnectedRealmID retrieves a connected realm given the region and realm slug.
 // Note maps are always passed by reference, so a pointer receiver here doesn't matter!
