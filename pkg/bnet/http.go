@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // OAuthResponse is the response struct for a client_credentials request
@@ -38,6 +39,7 @@ type Options struct {
 	EnableLogging     bool
 	ProductionLogging bool
 	LogLevel          string
+	HTTPTimeout       time.Duration
 }
 
 const regionPlaceholder = "{region}"
@@ -64,8 +66,15 @@ func New(clientID, clientSecret, oAuthUrl, apiUrl string, options *Options) (*BN
 
 	logger = logger.With().Str("in", "auc-bnet").Logger()
 
+	var timeout time.Duration
+	if options != nil {
+		timeout = options.HTTPTimeout
+	}
+
 	b := BNet{
-		httpClient:   &http.Client{},
+		httpClient: &http.Client{
+			Timeout: timeout,
+		},
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		oAuthUrl:     oAuthUrl,
