@@ -26,7 +26,9 @@ type HTTP interface {
 // AllRealmCollection maps a region string to a map of realm slug to connected realm id info
 type AllRealmCollection map[string]int
 
-// AllRealmCollection maps a region string to a map of realm slug to connected realm id info
+// ConnectedRealmCollection maps realm slug to connected realm ID.
+// Note that all realms are included, so values will be duplicated.
+// To see this data as a map of connected realm ID -> slug, use AsMap.
 type ConnectedRealmCollection map[string]int
 
 // IsValidRealm tests the given realmSlug and returns if it is valid
@@ -164,6 +166,21 @@ func init() {
 // Note maps are always passed by reference, so a pointer receiver here doesn't matter!
 func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region string) (int, error) {
 	return r.connRealmID(h, realmSlug, region, c)
+}
+
+// AsMap returns connected realms as a map of connRealmID -> []realmSlug
+func (c ConnectedRealmCollection) AsMap() (m map[int][]string) {
+	m = make(map[int][]string)
+
+	for slug, connRealmID := range c {
+		if _, ok := m[connRealmID]; ok {
+			m[connRealmID] = append(m[connRealmID], slug)
+		} else {
+			m[connRealmID] = []string{slug}
+		}
+	}
+
+	return
 }
 
 func (r *realmScanner) connRealmID(h HTTP, realmSlug, region string, c ConnectedRealmCollection) (int, error) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -136,5 +137,45 @@ func TestGetRealmList(t *testing.T) {
 	if !reflect.DeepEqual(realms, expected) {
 		t.Error("results not equal")
 		return
+	}
+}
+
+func TestConnectedRealmCollection_AsMap(t *testing.T) {
+	tests := []struct {
+		name  string
+		c     ConnectedRealmCollection
+		wantM map[int][]string
+	}{
+		{
+			name: "simple",
+			c: ConnectedRealmCollection{
+				"realm1-main": 1,
+				"realm2":      1,
+				"realm3-main": 3,
+				"realm4":      3,
+				"realm5":      1,
+			},
+			wantM: map[int][]string{
+				1: {"realm1-main", "realm2", "realm5"},
+				3: {"realm3-main", "realm4"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotM := tt.c.AsMap()
+			for k, v := range gotM {
+				if wantV, ok := tt.wantM[k]; ok {
+					sort.Strings(v)
+					sort.Strings(wantV)
+
+					if !reflect.DeepEqual(v, wantV) {
+						t.Errorf("AsMap() = %v, want %v", gotM, tt.wantM)
+					}
+				} else {
+					t.Errorf("AsMap() = %v, want %v", gotM, tt.wantM)
+				}
+			}
+		})
 	}
 }
