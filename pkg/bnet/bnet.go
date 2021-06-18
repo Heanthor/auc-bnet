@@ -119,10 +119,12 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 				return err
 			}
 
+			rs.lock.Lock()
 			for _, r := range realms {
 				crcCheck[r]++
 				crRealm[r] = c
 			}
+			rs.lock.Unlock()
 
 			return nil
 		})
