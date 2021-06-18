@@ -23,13 +23,11 @@ type HTTP interface {
 	Get(region, endpoint string) ([]byte, http.Header, error)
 }
 
-// AllRealmCollection maps a region string to a map of realm slug to connected realm id info
+// AllRealmCollection maps a realm slug to a blizzard realm ID
 type AllRealmCollection map[string]int
 
-// ConnectedRealmCollection maps realm slug to connected realm ID.
-// Note that all realms are included, so values will be duplicated.
-// To see this data as a map of connected realm ID -> slug, use AsMap.
-type ConnectedRealmCollection map[string]int
+// ConnectedRealmCollection maps connected realm ID -> realm slug.
+type ConnectedRealmCollection map[int][]string
 
 // IsValidRealm tests the given realmSlug and returns if it is valid
 func (rc AllRealmCollection) IsValidRealm(realmSlug string) bool {
@@ -42,6 +40,7 @@ type Realms struct {
 	Region          string
 	ConnectedRealms ConnectedRealmCollection
 	AllRealms       AllRealmCollection
+	crRealm         map[string]int
 }
 
 // GetRealmList calculates valid realm ids for a given region
@@ -87,7 +86,15 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 	// connected realms are returned as urls, extract out the id
 	regex := regexp.MustCompile(`connected-realm/([0-9]+)\?`)
 
-	crLookup := make(map[int]struct{})
+	crc := ConnectedRealmCollection(make(map[int][]string))
+	ar := AllRealmCollection(make(map[string]int))
+	crRealm := make(map[string]int)
+	rs := realmScanner{
+		lock: &sync.RWMutex{},
+	}
+
+	crCh := make(chan int, len(crr.ConnectedRealms))
+	crcCheck := make(map[string]int)
 	for _, cr := range crr.ConnectedRealms {
 		// extract id from url...
 		if matches := regex.FindStringSubmatch(cr.Href); matches != nil && len(matches) > 0 {
@@ -96,40 +103,25 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 				return nil, err
 			}
 
-			// and assign it to the map
-			crLookup[id] = struct{}{}
+			crCh <- id
 		}
 	}
-
-	m := ConnectedRealmCollection(make(map[string]int))
-	ar := AllRealmCollection(make(map[string]int))
-	rs := realmScanner{
-		lock: &sync.RWMutex{},
-	}
+	close(crCh)
 
 	ctx := context.Background()
 	eg, ctx := errgroup.WithContext(ctx)
-	ch := make(chan string, len(rlr.Realms))
-	for _, r := range rlr.Realms {
-		ar[r.Slug] = r.ID
-		if _, ok := crLookup[r.ID]; ok {
-			m[r.Slug] = r.ID
-		} else {
-			// retrieve these realms in parallel later
-			ch <- r.Slug
-		}
-	}
-	close(ch)
-
-	for slug := range ch {
-		s := slug
+	for crID := range crCh {
+		c := crID
 		eg.Go(func() error {
-			// this realm is non-root, do a secondary query to find its connRealmID
-			// connRealmID has a side effect of updating m
-			// and is thread safe thanks to the lock in rs
-			_, err := rs.connRealmID(h, s, region, m)
+			// scrape all realms attached to this connected realm, mutate crc
+			realms, err := rs.scrapeConnRealm(h, region, c, crc)
 			if err != nil {
 				return err
+			}
+
+			for _, r := range realms {
+				crcCheck[r]++
+				crRealm[r] = c
 			}
 
 			return nil
@@ -140,16 +132,29 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 		return nil, err
 	}
 
+	for _, r := range rlr.Realms {
+		ar[r.Slug] = r.ID
+		crcCheck[r.Slug]--
+		if crcCheck[r.Slug] == 0 {
+			delete(crcCheck, r.Slug)
+		}
+	}
+
+	if len(crcCheck) > 0 {
+		return nil, errors.New("realms not completely scraped")
+	}
+
 	r := &Realms{
-		ConnectedRealms: m,
+		ConnectedRealms: crc,
 		AllRealms:       ar,
 		Region:          region,
+		crRealm:         crRealm,
 	}
 
 	return r, nil
 }
 
-// realmScanner contains a lock which allows connRealmID to be called in parallel
+// realmScanner contains a lock which allows scrapeConnRealm to be called in parallel
 type realmScanner struct {
 	lock *sync.RWMutex
 }
@@ -164,75 +169,56 @@ func init() {
 
 // ConnectedRealmID retrieves a connected realm given the region and realm slug.
 // Note maps are always passed by reference, so a pointer receiver here doesn't matter!
-func (c ConnectedRealmCollection) ConnectedRealmID(h HTTP, realmSlug, region string) (int, error) {
-	return r.connRealmID(h, realmSlug, region, c)
+func (r Realms) ConnectedRealmID(h HTTP, realmSlug string) (int, error) {
+	id, ok := r.crRealm[realmSlug]
+	if !ok {
+		return -1, errors.New("realm not found in region")
+	}
+
+	return id, nil
 }
 
-// AsMap returns connected realms as a map of connRealmID -> []realmSlug
-func (c ConnectedRealmCollection) AsMap() (m map[int][]string) {
-	m = make(map[int][]string)
-
-	for slug, connRealmID := range c {
-		if _, ok := m[connRealmID]; ok {
-			m[connRealmID] = append(m[connRealmID], slug)
-		} else {
-			m[connRealmID] = []string{slug}
-		}
-	}
-
-	return
-}
-
-func (r *realmScanner) connRealmID(h HTTP, realmSlug, region string, c ConnectedRealmCollection) (int, error) {
-	if !IsValidRegion(region) {
-		return -1, fmt.Errorf("invalid region")
-	}
-
-	sanitized := strings.ToLower(strings.TrimSpace(realmSlug))
-
-	r.lock.RLock()
-	if id, ok := c[sanitized]; ok {
-		return id, nil
-	}
-	r.lock.RUnlock()
-
-	// connected realms are returned as urls, extract out the id
-	regex := regexp.MustCompile(`connected-realm/([0-9]+)\?`)
-
-	// if the realm is not a top-level connected realm, it is part of a realm pool
-	// we need to search for the pool it is in and save the connectedRealmID
-	resp, _, err := h.Get(region, fmt.Sprintf("data/wow/realm/%s?namespace=dynamic-%s&locale=en_US",
-		sanitized, region))
+func (r *realmScanner) scrapeConnRealm(h HTTP, region string, connRealmId int, c ConnectedRealmCollection) ([]string, error) {
+	resp, _, err := h.Get(region, fmt.Sprintf("/data/wow/connected-realm/%d?namespace=dynamic-%s&locale=en_US",
+		connRealmId, region))
 	if err != nil {
-		return -1, err
+		return nil, err
 	}
 
-	type realmResp struct {
-		ConnectedRealm struct {
-			Href string
-		} `json:"connected_realm"`
+	type crResp struct {
+		Realms []struct {
+			ID   int
+			Slug string
+		}
 	}
 
-	var rr realmResp
-	if err := json.Unmarshal(resp, &rr); err != nil {
-		return -1, err
+	var crr crResp
+	if err := json.Unmarshal(resp, &crr); err != nil {
+		return nil, err
 	}
 
-	if matches := regex.FindStringSubmatch(rr.ConnectedRealm.Href); matches != nil && len(matches) > 0 {
-		id, err := strconv.Atoi(matches[1])
-		if err != nil {
-			return -1, err
+	realms := make([]string, len(crr.Realms))
+	// only lock once :shrug:
+	r.lock.Lock()
+	for i, realmResp := range crr.Realms {
+		id := realmResp.ID
+		slug := realmResp.Slug
+		if id == 0 || slug == "" {
+			r.lock.Unlock()
+			return nil, errors.New("blank realm response")
 		}
 
-		r.lock.Lock()
-		// cache the result
-		c[realmSlug] = id
-		r.lock.Unlock()
-
-		return id, nil
+		realms[i] = slug
+		if _, ok := c[connRealmId]; ok {
+			c[connRealmId] = append(c[connRealmId], slug)
+		} else {
+			c[connRealmId] = []string{slug}
+		}
 	}
 
-	return -1, errors.New("could not find connected realm in href for realm")
+	r.lock.Unlock()
+
+	return realms, nil
 }
 
 // remove diacritics

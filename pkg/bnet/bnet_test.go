@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
-	"sort"
 	"testing"
 )
 
@@ -45,10 +44,13 @@ type mockConnectedRealmsResponse struct {
 	} `json:"connected_realms"`
 }
 
+type crEntry struct {
+	ID   int
+	Slug string
+}
+
 type mockSingleConnRealmResp struct {
-	ConnectedRealm struct {
-		Href string
-	} `json:"connected_realm"`
+	Realms []crEntry
 }
 
 func TestGetRealmList(t *testing.T) {
@@ -97,15 +99,11 @@ func TestGetRealmList(t *testing.T) {
 		getMap: map[string]getResp{
 			"data/wow/realm/index?locale=en_US&namespace=dynamic-us":           {data: realmList},
 			"data/wow/connected-realm/index?locale=en_US&namespace=dynamic-us": {data: connRealmList},
-			// single connected realms responses for realms that need followup queries
-			"data/wow/realm/realm2?namespace=dynamic-us&locale=en_US": {data: mockSingleConnRealmResp{
-				ConnectedRealm: struct{ Href string }{Href: "https://unittest.com/data/wow/connected-realm/1?namespace=dynamic-us"},
+			"/data/wow/connected-realm/1?namespace=dynamic-us&locale=en_US": {data: mockSingleConnRealmResp{
+				Realms: []crEntry{{1, "realm1-main"}, {2, "realm2"}, {5, "realm5"}},
 			}},
-			"data/wow/realm/realm4?namespace=dynamic-us&locale=en_US": {data: mockSingleConnRealmResp{
-				ConnectedRealm: struct{ Href string }{Href: "https://unittest.com/data/wow/connected-realm/3?namespace=dynamic-us"},
-			}},
-			"data/wow/realm/realm5?namespace=dynamic-us&locale=en_US": {data: mockSingleConnRealmResp{
-				ConnectedRealm: struct{ Href string }{Href: "https://unittest.com/data/wow/connected-realm/1?namespace=dynamic-us"},
+			"/data/wow/connected-realm/3?namespace=dynamic-us&locale=en_US": {data: mockSingleConnRealmResp{
+				Realms: []crEntry{{3, "realm3-main"}, {4, "realm4"}},
 			}},
 		},
 	}
@@ -118,7 +116,7 @@ func TestGetRealmList(t *testing.T) {
 
 	expected := &Realms{
 		Region: "us",
-		ConnectedRealms: ConnectedRealmCollection{
+		crRealm: map[string]int{
 			"realm1-main": 1,
 			"realm2":      1,
 			"realm3-main": 3,
@@ -132,50 +130,14 @@ func TestGetRealmList(t *testing.T) {
 			"realm4":      4,
 			"realm5":      5,
 		},
+		ConnectedRealms: ConnectedRealmCollection{
+			1: []string{"realm1-main", "realm2", "realm5"},
+			3: []string{"realm3-main", "realm4"},
+		},
 	}
 
 	if !reflect.DeepEqual(realms, expected) {
 		t.Error("results not equal")
 		return
-	}
-}
-
-func TestConnectedRealmCollection_AsMap(t *testing.T) {
-	tests := []struct {
-		name  string
-		c     ConnectedRealmCollection
-		wantM map[int][]string
-	}{
-		{
-			name: "simple",
-			c: ConnectedRealmCollection{
-				"realm1-main": 1,
-				"realm2":      1,
-				"realm3-main": 3,
-				"realm4":      3,
-				"realm5":      1,
-			},
-			wantM: map[int][]string{
-				1: {"realm1-main", "realm2", "realm5"},
-				3: {"realm3-main", "realm4"},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotM := tt.c.AsMap()
-			for k, v := range gotM {
-				if wantV, ok := tt.wantM[k]; ok {
-					sort.Strings(v)
-					sort.Strings(wantV)
-
-					if !reflect.DeepEqual(v, wantV) {
-						t.Errorf("AsMap() = %v, want %v", gotM, tt.wantM)
-					}
-				} else {
-					t.Errorf("AsMap() = %v, want %v", gotM, tt.wantM)
-				}
-			}
-		})
 	}
 }
