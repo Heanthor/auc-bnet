@@ -127,8 +127,6 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 					crRealm[r] = c
 				}
 				rs.lock.Unlock()
-
-				return nil
 			}
 
 			return nil
