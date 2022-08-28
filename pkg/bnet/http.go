@@ -1,11 +1,14 @@
 package bnet
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -185,7 +188,7 @@ func (b *BNet) Get(region, endpoint string) ([]byte, http.Header, error) {
 }
 
 func (b *BNet) get(url string, headers ...[]string) (int, http.Header, []byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		b.log.Error().Msg("Could not retrieve access token")
 
@@ -242,7 +245,9 @@ func (b *BNet) GetIfNotModified(region, endpoint string, since string) (string, 
 
 	url := subRegion(b.apiUrl, endpoint, region)
 
-	status, headers, body, err := b.get(url, h)
+	g := []string{"Accept-Encoding", "gzip"}
+
+	status, headers, body, err := b.get(url, h, g)
 	if err != nil || status == http.StatusNotModified {
 		return "", nil, err
 	}
@@ -251,5 +256,20 @@ func (b *BNet) GetIfNotModified(region, endpoint string, since string) (string, 
 		return "", body, fmt.Errorf("GetIfNotModified returned %d: %s", status, string(body))
 	}
 
-	return headers.Get("Last-Modified"), body, err
+	bb := body
+	if headers.Get("content-encoding") == "gzip" {
+		// it's not optimal to buffer body where we could stream it, maybe change later
+		rd, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		unzipped, err := io.ReadAll(rd)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to create gzip reader: %w", err)
+
+		}
+		bb = unzipped
+	}
+
+	return headers.Get("Last-Modified"), bb, err
 }
