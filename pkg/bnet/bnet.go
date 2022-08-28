@@ -110,21 +110,26 @@ func GetRealmList(h HTTP, region string) (*Realms, error) {
 
 	ctx := context.Background()
 	eg, ctx := errgroup.WithContext(ctx)
-	for crID := range crCh {
-		c := crID
+	threads := 5
+	for i := 0; i < threads; i++ {
 		eg.Go(func() error {
-			// scrape all realms attached to this connected realm, mutate crc
-			realms, err := rs.scrapeConnRealm(h, region, c, crc)
-			if err != nil {
-				return err
-			}
+			for crID := range crCh {
+				c := crID
+				// scrape all realms attached to this connected realm, mutate crc
+				realms, err := rs.scrapeConnRealm(h, region, c, crc)
+				if err != nil {
+					return err
+				}
 
-			rs.lock.Lock()
-			for _, r := range realms {
-				crcCheck[r]++
-				crRealm[r] = c
+				rs.lock.Lock()
+				for _, r := range realms {
+					crcCheck[r]++
+					crRealm[r] = c
+				}
+				rs.lock.Unlock()
+
+				return nil
 			}
-			rs.lock.Unlock()
 
 			return nil
 		})
